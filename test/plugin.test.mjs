@@ -322,12 +322,74 @@ test('plugin: createHost lists sessions and delivers to a fake live agent', asyn
     (error) => error.code === 'inbound-unavailable' && Array.isArray(error.details?.sessions),
   )
 
+  // Default delivery queues behind a running turn instead of interrupting it.
+  const queuedAgent = makeFakeAgent({ id: 'session-running', reply: 'queued', running: true })
+  const { ctx: queuedCtx } = makeFakeCtx(queuedAgent)
+  const queuedHost = api.createHost(queuedCtx, config, { SessionSeq: (n) => n }, { logger: api.createLogger() })
+  const queuedResult = await queuedHost.deliverToSession({ sessionId: queuedAgent.id, text: 'later' })
+  assert.equal(queuedResult.text, 'queued')
+  assert.equal(queuedAgent.sent[0].kind, 'followup')
+
+  // The upstream steer behaviour stays available as an explicit opt-in.
+  const steerConfig = api.normalizeConfig({ peerHome: home, liveSession: { delivery: 'steer-when-running' } })
   const runningAgent = makeFakeAgent({ id: 'session-running', reply: 'steered', running: true })
   const { ctx: runningCtx } = makeFakeCtx(runningAgent)
-  const runningHost = api.createHost(runningCtx, config, { SessionSeq: (n) => n }, { logger: api.createLogger() })
+  const runningHost = api.createHost(runningCtx, steerConfig, { SessionSeq: (n) => n }, { logger: api.createLogger() })
   const runningResult = await runningHost.deliverToSession({ sessionId: runningAgent.id, text: 'correction' })
   assert.equal(runningResult.text, 'steered')
   assert.equal(runningAgent.sent[0].kind, 'steer')
+})
+
+test('plugin: a live session outlives the guest timer and a dropped guest', async (t) => {
+  const api = requireLib(t); if (!api) return
+  const home = await peerHome(t)
+  // A turn that settles after the configured turn timeout, as a long agent-team task would.
+  const agent = makeFakeAgent({ reply: 'finished late' })
+  let cancels = 0
+  agent.cancel = async () => { cancels += 1 }
+  let idle = Promise.resolve()
+  const followup = agent.followup
+  agent.followup = (message) => {
+    idle = new Promise((resolve) => setTimeout(resolve, 1300))
+    idle.then(() => followup(message))
+  }
+  agent.whenIdle = () => idle
+  const { ctx } = makeFakeCtx(agent)
+  const config = api.normalizeConfig({ peerHome: home, turnTimeoutMs: 1000 })
+  const host = api.createHost(ctx, config, { SessionSeq: (n) => n }, { logger: api.createLogger() })
+
+  const guest = new AbortController()
+  const pending = host.deliverToSession({ sessionId: agent.id, text: 'long job', signal: guest.signal })
+  guest.abort()
+  const result = await pending
+  assert.equal(result.text, 'finished late')
+  assert.equal(cancels, 0, 'neither the timer nor the dropped guest may cancel the live session')
+
+  // Opting back into upstream semantics restores cancellation on abort.
+  const bound = makeFakeAgent({ id: 'session-bound' })
+  let boundCancels = 0
+  bound.cancel = async () => { boundCancels += 1 }
+  const { ctx: boundCtx } = makeFakeCtx(bound)
+  const boundConfig = api.normalizeConfig({ peerHome: home, liveSession: { cancelOnAbort: true } })
+  const boundHost = api.createHost(boundCtx, boundConfig, { SessionSeq: (n) => n }, { logger: api.createLogger() })
+  const aborted = new AbortController()
+  aborted.abort()
+  await boundHost.deliverToSession({ sessionId: bound.id, text: 'x', signal: aborted.signal })
+  assert.equal(boundCancels, 1)
+})
+
+test('plugin: enabledHarnesses limits which adapters exist', async (t) => {
+  const api = requireLib(t); if (!api) return
+  const { createAdapters } = await import('../lib/adapters/index.js')
+  const config = api.normalizeConfig({ enabledHarnesses: ['dsh'] })
+  assert.deepEqual(config.enabledHarnesses, ['dsh'])
+  const registry = createAdapters({ config, logger: api.createLogger() })
+  assert.deepEqual((await registry.all()).map((adapter) => adapter.harness), ['dsh'])
+  await assert.rejects(() => registry.get('claude'), (error) => error.code === 'adapter-unavailable')
+  await assert.rejects(() => registry.get('nope'), (error) => error.code === 'not-found')
+  assert.deepEqual(api.normalizeConfig().enabledHarnesses, ['dsh', 'claude', 'codex', 'codex-desktop'])
+  assert.throws(() => api.normalizeConfig({ enabledHarnesses: ['dsh', 'bogus'] }), /unknown harness/)
+  assert.throws(() => api.normalizeConfig({ liveSession: { delivery: 'interrupt' } }), /liveSession.delivery/)
 })
 
 test('plugin: createHost inherits the caller model route and cwd for in-process turns', async (t) => {

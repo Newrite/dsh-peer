@@ -5,6 +5,14 @@
 # The row mounts the cross-harness bridge: it starts the loopback HTTP bridge,
 # registers the five model-facing peer tools, and delivers guest messages into
 # live DSH sessions. See CONTRACT.md sections 8 and 9.
+#
+# Kalpa fork defaults: inbound delivery only (no child `claude`/`codex`
+# processes), and a guest never cancels or interrupts a live session.
 - insert:
     - id: dsh-peer
       name: '@caelricluo/dsh-peer'
+      config:
+        enabledHarnesses: [dsh]
+        liveSession:
+          delivery: queue
+          cancelOnAbort: false
