@@ -23,7 +23,9 @@ peer_notify { "text": "Weights as two RGBA8 textures or a second vertex attribut
 
 The message is stored as `role: "user"`, `from: { harness: "dsh", name: "lead" }`,
 `meta: { kind, sessionId }` in the open thread titled `inbox.title` (default `architect-inbox`), created on first use.
-Readers follow it with `peer read --thread <id> --follow` or `GET /v1/threads/<id>?after=N&wait_seconds=300`, and reply
+Readers follow it with `node scripts/inbox-watch.mjs` (blocks until the next lead message, prints it and exits; the
+read cursor lives in `$PEER_HOME/inbox-cursor.json`, and a DSH restart is waited out), `peer read --thread <id> --follow`
+or `GET /v1/threads/<id>?after=N&wait_seconds=300`, and reply
 with `peer send --thread <work-thread> --session <meta.sessionId> ...`. A final answer to a delegated task is returned
 through the original thread automatically and should not be duplicated through the inbox.
 
