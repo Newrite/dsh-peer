@@ -1,6 +1,6 @@
 /**
  * CONTRACT sections 8 + 9 + 10.5: lib/index.js exports a factory that
- * registers exactly five tools, rejects a non-loopback host, and wires
+ * registers exactly six tools, rejects a non-loopback host, and wires
  * inbound delivery into a fake live DSH agent. Also covers lib/tool.js, the
  * local defineTool compiler (zero @deepseek-ai imports).
  *
@@ -28,7 +28,7 @@ function requireLib(t) {
   return null
 }
 
-const EXPECTED_TOOLS = ['peer_status', 'peer_ask', 'peer_send', 'peer_wait', 'peer_thread']
+const EXPECTED_TOOLS = ['peer_status', 'peer_ask', 'peer_send', 'peer_wait', 'peer_thread', 'peer_notify']
 
 function makeFakeAgent({ id = 'session-fake-1', reply = 'live reply', running = false } = {}) {
   const events = []
@@ -168,7 +168,7 @@ test('tool: defineTool validates arguments and throws ToolArgsError', async () =
   await assert.rejects(() => numeric.execute({ n: 1, whole: 1.5 }, {}), ToolArgsError)
 })
 
-test('plugin: TOOL_NAMES is exactly the five contract tools in order', (t) => {
+test('plugin: TOOL_NAMES is exactly the six contract tools in order', (t) => {
   const api = requireLib(t); if (!api) return
   assert.deepEqual([...api.TOOL_NAMES], EXPECTED_TOOLS)
   assert.equal(api.name, 'dsh-peer')
@@ -209,7 +209,7 @@ test('plugin: createPeerPlugin exposes name/inject/apply with optional deps', (t
   assert.equal(typeof api.default.createPeerPlugin, 'function')
 })
 
-test('plugin: buildToolDefinitions registers exactly five well-formed tools', (t) => {
+test('plugin: buildToolDefinitions registers exactly six well-formed tools', (t) => {
   const api = requireLib(t); if (!api) return
   const definitions = api.buildToolDefinitions({
     deps: {},
@@ -218,7 +218,7 @@ test('plugin: buildToolDefinitions registers exactly five well-formed tools', (t
     config: api.normalizeConfig(),
     host: {},
   })
-  assert.equal(definitions.length, 5)
+  assert.equal(definitions.length, 6)
   assert.deepEqual(definitions.map((definition) => definition.name), EXPECTED_TOOLS)
   for (const definition of definitions) {
     assert.equal(typeof definition.description, 'string')
@@ -542,7 +542,7 @@ test('plugin: inbound continues a dsh thread through the recorded remote session
   assert.equal(calls[2].resumeSessionId, 'session-explicit-2')
 })
 
-test('plugin: apply registers five tools, writes bridge.json, delivers inbound, shuts down', { timeout: 30000 }, async (t) => {
+test('plugin: apply registers six tools, writes bridge.json, delivers inbound, shuts down', { timeout: 30000 }, async (t) => {
   const api = requireLib(t); if (!api) return
   const home = await peerHome(t)
   const agent = makeFakeAgent({ id: 'session-e2e', reply: 'e2e reply' })
@@ -563,7 +563,7 @@ test('plugin: apply registers five tools, writes bridge.json, delivers inbound, 
   const handle = await plugin.apply(ctx, rawConfig)
   t.after(async () => { if (handle && typeof handle.shutdown === 'function') await handle.shutdown() })
 
-  assert.equal(registered.length, 5)
+  assert.equal(registered.length, 6)
   assert.deepEqual(registered.map((definition) => definition.name), EXPECTED_TOOLS)
   assert.equal(handle.config.host, '127.0.0.1')
   assert.equal(handle.peerHome, home)
@@ -613,7 +613,7 @@ test('plugin: module-level cordis apply resolves undefined and mounts the bridge
   // loader throw "Invalid effect" and unload the plugin (the real 0.1.0 bug).
   const value = await api.apply(ctx, { peerHome: home, port: 0, token: 'cordis-token' })
   assert.equal(value, undefined, 'cordis apply must not return the control handle')
-  assert.equal(registered.length, 5)
+  assert.equal(registered.length, 6)
   const { readFile } = await import('node:fs/promises')
   const bridgeFile = JSON.parse(await readFile(home + '/bridge.json', 'utf8'))
   assert.match(bridgeFile.url, /^http:\/\/127\.0\.0\.1:\d+$/)
@@ -673,4 +673,48 @@ test('plugin: waitForQuiet times out instead of spinning forever', { timeout: 50
     (error) => error && error.code === 'timeout',
   )
   assert.ok(Date.now() - started < 2500, 'bounded wait must end near the deadline')
+})
+
+test('plugin: peer_notify appends to one inbox thread and never runs a turn', async (t) => {
+  const api = requireLib(t); if (!api) return
+  const { createStore } = await import('../lib/store.js')
+  const home = await peerHome(t)
+  const store = createStore({ home })
+  await store.init()
+  t.after(async () => { await store.close?.() })
+  let turns = 0
+  const bridge = fakeBridge({ async sendMessage() { turns += 1; throw new Error('peer_notify must not start a turn') } })
+  // enabledHarnesses: ['dsh'] — the inbox works although the claude adapter is disabled.
+  const config = api.normalizeConfig({ enabledHarnesses: ['dsh'] })
+  const definitions = api.buildToolDefinitions({ deps: {}, bridge, store, config, host: {} })
+  const notify = definitions.find((definition) => definition.name === 'peer_notify')
+  const exec = { agent: { id: 'session-lead' }, signal: new AbortController().signal }
+
+  // Concurrent first calls share one inbox.
+  const [a, b] = await Promise.all([
+    notify.execute({ text: 'Which weight layout do you prefer?', kind: 'question' }, exec),
+    notify.execute({ text: 'Halfway through the shader.', kind: 'progress' }, exec),
+  ])
+  assert.equal(a.thread_id, b.thread_id)
+  const third = await notify.execute({ text: 'done' }, exec)
+  assert.equal(third.thread_id, a.thread_id)
+  assert.equal(turns, 0)
+
+  const thread = await store.getThread(a.thread_id)
+  assert.equal(thread.title, 'architect-inbox')
+  const messages = await store.readMessages(a.thread_id, { after: 0, waitSeconds: 0 })
+  assert.deepEqual(messages.map((message) => message.meta.kind).sort(), ['progress', 'question', 'report'])
+  for (const message of messages) {
+    assert.equal(message.role, 'user')
+    assert.deepEqual(message.from, { harness: 'dsh', name: 'lead' })
+    assert.equal(message.meta.sessionId, 'session-lead')
+  }
+
+  await assert.rejects(() => notify.execute({ text: 'x', kind: 'shout' }, exec), /kind/)
+
+  // A closed inbox is replaced instead of failing the notification.
+  await store.closeThread(a.thread_id)
+  const after = await notify.execute({ text: 'still here', kind: 'blocker' }, exec)
+  assert.notEqual(after.thread_id, a.thread_id)
+  assert.equal((await store.getThread(after.thread_id)).status, 'open')
 })
