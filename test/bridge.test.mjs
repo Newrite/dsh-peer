@@ -252,6 +252,26 @@ test('bridge HTTP surface', { timeout: 45000 }, async (t) => {
     assert.ok(!turnCalls.some((call) => call.userText === 'ping'), 'dsh turns must not hit the adapter registry')
   })
 
+  await t.test('a thread that reached a live session stays bound to it', async () => {
+    const thread = await createThread({ harness: 'dsh' })
+    const before = inboundCalls.length
+    // The message route forwards an explicit live target (upstream dropped it).
+    const first = await req('/v1/threads/' + thread.id + '/messages', {
+      method: 'POST',
+      body: { text: 'task', await: true, to: { session_id: 'session-live-1' } },
+    })
+    assert.equal(first.status, 200, first.text)
+    assert.equal(inboundCalls[before].request.to.session_id, 'session-live-1')
+    assert.equal(first.json.thread.liveSessionId, 'session-live-1')
+
+    // A follow-up without a target is handed the binding, so the inbound
+    // handler can deliver to the same live session instead of resuming it.
+    const second = await req('/v1/threads/' + thread.id + '/messages', { method: 'POST', body: { text: 'more', await: true } })
+    assert.equal(second.status, 200, second.text)
+    assert.equal(inboundCalls[before + 1].request.to, undefined)
+    assert.equal(inboundCalls[before + 1].thread.liveSessionId, 'session-live-1')
+  })
+
   await t.test('unknown route -> 404 not-found JSON', async () => {
     const out = await req('/v1/definitely-not-a-route')
     assert.equal(out.status, 404)

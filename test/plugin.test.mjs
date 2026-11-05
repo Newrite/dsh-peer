@@ -378,6 +378,27 @@ test('plugin: a live session outlives the guest timer and a dropped guest', asyn
   assert.equal(boundCancels, 1)
 })
 
+test('plugin: inbound delivers a bound thread to its live session', async (t) => {
+  const api = requireLib(t); if (!api) return
+  const calls = []
+  const inbound = api.createInboundHandler({
+    host: {
+      async deliverToSession(input) { calls.push({ kind: 'deliver', input }); return { text: 'ok', sessionId: input.sessionId, resumed: true } },
+      async runAgentTurn(input) { calls.push({ kind: 'turn', input }); return { text: 'child', sessionId: 'session-child', resumed: false } },
+    },
+  })
+  const bound = { id: 'thr_1', liveSessionId: 'session-live', remoteSessionId: 'session-live', context: {} }
+  await inbound({ thread: bound, message: { text: 'follow-up' }, request: {} })
+  assert.equal(calls[0].kind, 'deliver')
+  assert.equal(calls[0].input.sessionId, 'session-live')
+
+  // An unbound thread still starts or resumes a child agent.
+  const child = { id: 'thr_2', liveSessionId: null, remoteSessionId: 'session-child', context: {} }
+  await inbound({ thread: child, message: { text: 'q' }, request: {} })
+  assert.equal(calls[1].kind, 'turn')
+  assert.equal(calls[1].input.resumeSessionId, 'session-child')
+})
+
 test('plugin: enabledHarnesses limits which adapters exist', async (t) => {
   const api = requireLib(t); if (!api) return
   const { createAdapters } = await import('../lib/adapters/index.js')

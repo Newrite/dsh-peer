@@ -358,14 +358,17 @@ async function commandAsk(context) {
   if (target !== undefined && !HARNESSES.includes(target)) {
     throw new UsageError('--to must be one of: ' + HARNESSES.join(', '))
   }
-  if (optionalString(options.session) !== undefined && target !== 'dsh') {
+  if (optionalString(options.session) !== undefined && target !== undefined && target !== 'dsh') {
     throw new UsageError('--session is only valid with --to dsh')
   }
   const overrides = messageOverrides(context)
+  // Every path that names a live session must carry it on the message itself;
+  // upstream dropped it for --thread and for --wait 0.
+  const liveTarget = optionalString(options.session) !== undefined ? { to: { session_id: options.session } } : {}
 
   if (optionalString(options.thread) !== undefined) {
     const threadId = requireOption(options.thread, '--thread')
-    const body = { text: prompt, from: { harness: 'user' }, await: wait > 0, ...overrides }
+    const body = { text: prompt, from: { harness: 'user' }, await: wait > 0, ...overrides, ...liveTarget }
     const result = await httpJson(
       bridgeFor(context),
       'POST',
@@ -385,7 +388,7 @@ async function commandAsk(context) {
       bridgeFor(context),
       'POST',
       '/v1/threads/' + encodeURIComponent(String(threadId)) + '/messages',
-      { text: prompt, from: { harness: 'user' }, await: false },
+      { text: prompt, from: { harness: 'user' }, await: false, ...liveTarget },
       { timeoutMs: 30_000 },
     )
     writeLine(context.stderr, 'peer: message queued in thread ' + threadId + ' (--wait 0)')
@@ -427,6 +430,7 @@ async function commandSend(context) {
     from: { harness: 'user' },
     await: wait > 0,
     ...messageOverrides(context),
+    ...(optionalString(options.session) !== undefined ? { to: { session_id: options.session } } : {}),
   }
   const result = await httpJson(
     bridgeFor(context),
