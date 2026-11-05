@@ -63,6 +63,8 @@ const FLAGS = Object.freeze({
   '--append-system': { key: 'appendSystem', kind: 'string' },
   '--file': { key: 'files', kind: 'list' },
   '--session': { key: 'session', kind: 'string' },
+  '--goal': { key: 'goal', kind: 'string' },
+  '--goal-rounds': { key: 'goalRounds', kind: 'number' },
   '--resume': { key: 'resume', kind: 'string' },
   '--thread': { key: 'thread', kind: 'string' },
   '--wait': { key: 'wait', kind: 'number' },
@@ -101,6 +103,8 @@ const HELP_TEXT = [
   '  --append-system <text|@file>  appended system prompt',
   '  --file <path>             context file (repeatable)',
   '  --session <id>            dsh only: deliver into a live DSH session',
+  '  --goal <objective>        with --session: also set a session goal so DSH keeps going round after round',
+  '  --goal-rounds <n>         round cap for --goal (host default when omitted)',
   '  --resume <id>             remote session id (codex-desktop thread, claude/codex session)',
   '  --thread <id>             continue an existing thread instead',
   '  --wait <seconds>          wait cap, default 300; 0 = fire and forget',
@@ -388,7 +392,7 @@ async function commandAsk(context) {
       bridgeFor(context),
       'POST',
       '/v1/threads/' + encodeURIComponent(String(threadId)) + '/messages',
-      { text: prompt, from: { harness: 'user' }, await: false, ...liveTarget },
+      { text: prompt, from: { harness: 'user' }, await: false, ...liveTarget, ...(overrides.goal ? { goal: overrides.goal } : {}) },
       { timeoutMs: 30_000 },
     )
     writeLine(context.stderr, 'peer: message queued in thread ' + threadId + ' (--wait 0)')
@@ -836,6 +840,14 @@ function messageOverrides(context) {
   if (effort !== undefined) overrides.reasoning_effort = effort
   const contextFields = contextFromFlags(options, cwd)
   if (Object.keys(contextFields).length > 0) overrides.context = contextFields
+  const objective = optionalString(options.goal)
+  if (objective !== undefined) {
+    if (optionalString(options.session) === undefined) throw new UsageError('--goal requires --session (a live DSH session)')
+    overrides.goal = { objective }
+    if (options.goalRounds !== undefined) overrides.goal.max_rounds = Math.floor(options.goalRounds)
+  } else if (options.goalRounds !== undefined) {
+    throw new UsageError('--goal-rounds requires --goal')
+  }
   return overrides
 }
 

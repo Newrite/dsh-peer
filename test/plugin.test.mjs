@@ -718,3 +718,80 @@ test('plugin: peer_notify appends to one inbox thread and never runs a turn', as
   assert.notEqual(after.thread_id, a.thread_id)
   assert.equal((await store.getThread(after.thread_id)).status, 'open')
 })
+
+function makeFakeGoals() {
+  const created = []
+  let current
+  return {
+    created,
+    get() { return current },
+    create(agent, request) {
+      if (current && current.phase !== 'complete') throw new Error('GOAL_ALREADY_EXISTS')
+      current = { id: 'goal-1', revision: 1, objective: request.objective, phase: 'active', activation: 'armed', maxGoalRounds: request.maxGoalRounds ?? 256 }
+      created.push({ agentId: agent.id, request })
+      return current
+    },
+    finish() { current = { ...current, phase: 'complete', activation: 'disarmed' } },
+    set(view) { current = view },
+  }
+}
+
+test('plugin: a delegated goal is set after the task text and keeps the wait open until it settles', async (t) => {
+  const api = requireLib(t); if (!api) return
+  const home = await peerHome(t)
+  const agent = makeFakeAgent({ reply: 'all rounds done' })
+  const goals = makeFakeGoals()
+  const order = []
+  const followup = agent.followup
+  agent.followup = (message) => {
+    order.push('followup')
+    // The goal round driver keeps the session busy until the goal completes.
+    setTimeout(() => { followup(message); goals.finish() }, 50)
+  }
+  const realCreate = goals.create.bind(goals)
+  goals.create = (a, r) => { order.push('goal'); return realCreate(a, r) }
+  const { ctx } = makeFakeCtx(agent)
+  const get = ctx.get.bind(ctx)
+  ctx.get = (service) => (service === 'goals' ? goals : get(service))
+  const config = api.normalizeConfig({ peerHome: home, liveSession: { allowGoals: true } })
+  const host = api.createHost(ctx, config, { SessionSeq: (n) => n }, { logger: api.createLogger() })
+
+  // While the goal is active and armed the session is not quiet, even when idle.
+  assert.equal(api.goalStillRunning(ctx, agent), false)
+  const result = await host.deliverToSession({ sessionId: agent.id, text: 'task', goal: { objective: 'Ship terrain v2', max_rounds: 12 } })
+  assert.deepEqual(order, ['followup', 'goal'])
+  assert.deepEqual(goals.created[0].request, { objective: 'Ship terrain v2', maxGoalRounds: 12 })
+  assert.equal(result.text, 'all rounds done')
+
+  goals.set({ id: 'goal-1', revision: 2, objective: 'x', phase: 'active', activation: 'armed' })
+  assert.equal(api.goalStillRunning(ctx, agent), true)
+  goals.set({ id: 'goal-1', revision: 3, objective: 'x', phase: 'active', activation: 'disarmed' })
+  assert.equal(api.goalStillRunning(ctx, agent), false)
+})
+
+test('plugin: delegated goals are refused cleanly before touching the session', async (t) => {
+  const api = requireLib(t); if (!api) return
+  const home = await peerHome(t)
+  const agent = makeFakeAgent()
+  const goals = makeFakeGoals()
+  const { ctx } = makeFakeCtx(agent)
+  const get = ctx.get.bind(ctx)
+  ctx.get = (service) => (service === 'goals' ? goals : get(service))
+
+  // Disabled by default.
+  const off = api.createHost(ctx, api.normalizeConfig({ peerHome: home }), { SessionSeq: (n) => n }, { logger: api.createLogger() })
+  await assert.rejects(() => off.deliverToSession({ sessionId: agent.id, text: 't', goal: { objective: 'o' } }), (error) => error.code === 'goal-unavailable')
+  assert.equal(agent.sent.length, 0)
+
+  // An unfinished goal is never overwritten.
+  goals.set({ id: 'goal-0', revision: 4, objective: 'previous work', phase: 'paused', activation: 'disarmed' })
+  const on = api.createHost(ctx, api.normalizeConfig({ peerHome: home, liveSession: { allowGoals: true } }), { SessionSeq: (n) => n }, { logger: api.createLogger() })
+  await assert.rejects(() => on.deliverToSession({ sessionId: agent.id, text: 't', goal: { objective: 'o' } }), (error) => error.code === 'goal-conflict' && error.details.objective === 'previous work')
+  assert.equal(agent.sent.length, 0)
+  assert.equal(goals.created.length, 0)
+
+  // Wire validation.
+  assert.throws(() => api.normalizeGoal({ objective: '  ' }), /objective/)
+  assert.throws(() => api.normalizeGoal({ objective: 'o', max_rounds: 0 }), /max_rounds/)
+  assert.deepEqual(api.normalizeGoal({ objective: ' o ', max_rounds: 3 }), { objective: 'o', max_rounds: 3 })
+})

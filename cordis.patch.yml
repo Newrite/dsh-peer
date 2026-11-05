@@ -16,3 +16,6 @@
         liveSession:
           delivery: queue
           cancelOnAbort: false
+          # A delegator may attach a session goal (as /goal would) so the lead
+          # keeps working round after round instead of stopping after a commit.
+          allowGoals: true
